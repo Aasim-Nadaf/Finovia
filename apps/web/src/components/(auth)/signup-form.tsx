@@ -14,27 +14,54 @@ export function SignupForm({ className }: { className?: string }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email) return;
+    setError(null);
     setLoading(true);
     try {
       await signup(name || email.split("@")[0] || "User", email, password);
-      router.push("/#analyzer");
-    } finally {
+      setSuccess("Account created successfully! Redirecting...");
+      setTimeout(() => {
+        router.push("/#analyzer");
+      }, 500);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to create account. Please try again.");
       setLoading(false);
     }
   };
 
-  const handleDemoCandidate = () => {
-    demoLogin("candidate");
-    router.push("/#analyzer");
+  const handleDemoCandidate = async () => {
+    setError(null);
+    setLoading(true);
+    try {
+      await demoLogin("candidate");
+      setSuccess("Logged in as Alex Morgan (Candidate)! Redirecting...");
+      setTimeout(() => {
+        router.push("/#analyzer");
+      }, 500);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load demo profile.");
+      setLoading(false);
+    }
   };
 
-  const handleDemoRecruiter = () => {
-    demoLogin("recruiter");
-    router.push("/#analyzer");
+  const handleDemoRecruiter = async () => {
+    setError(null);
+    setLoading(true);
+    try {
+      await demoLogin("recruiter");
+      setSuccess("Logged in as Sarah Lin (Recruiter)! Redirecting...");
+      setTimeout(() => {
+        router.push("/#analyzer");
+      }, 500);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load demo profile.");
+      setLoading(false);
+    }
   };
 
   return (
@@ -65,7 +92,8 @@ export function SignupForm({ className }: { className?: string }) {
                 <button
                   type="button"
                   onClick={handleDemoCandidate}
-                  className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-white border border-black/[0.08] text-[#0e2118] hover:border-[#0e2118] transition shadow-2xs cursor-pointer"
+                  disabled={loading}
+                  className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-white border border-black/[0.08] text-[#0e2118] hover:border-[#0e2118] transition shadow-2xs cursor-pointer disabled:opacity-50"
                 >
                   <UserCheck className="size-3.5 text-emerald-700" />
                   <span>Alex (Candidate)</span>
@@ -73,13 +101,27 @@ export function SignupForm({ className }: { className?: string }) {
                 <button
                   type="button"
                   onClick={handleDemoRecruiter}
-                  className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-white border border-black/[0.08] text-[#0e2118] hover:border-[#0e2118] transition shadow-2xs cursor-pointer"
+                  disabled={loading}
+                  className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-white border border-black/[0.08] text-[#0e2118] hover:border-[#0e2118] transition shadow-2xs cursor-pointer disabled:opacity-50"
                 >
                   <ShieldCheck className="size-3.5 text-emerald-700" />
                   <span>Sarah (Recruiter)</span>
                 </button>
               </div>
             </div>
+
+            {error && (
+              <div className="mb-4 p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-700 flex items-center gap-2">
+                <span className="font-semibold">Error:</span> {error}
+              </div>
+            )}
+
+            {success && (
+              <div className="mb-4 p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 flex items-center gap-2">
+                <Check className="size-4 text-emerald-600 shrink-0" />
+                <span>{success}</span>
+              </div>
+            )}
 
             {/* Email Form */}
             <form onSubmit={handleSubmit} className="space-y-3">

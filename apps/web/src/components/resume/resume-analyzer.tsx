@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { useAuth } from "@/context/auth-context";
 import {
   Upload,
@@ -16,6 +16,11 @@ import {
   Search,
   Check,
   Zap,
+  Bookmark,
+  Trash2,
+  History,
+  FileText,
+  X,
 } from "lucide-react";
 import type { ResumeAnalysisResult } from "@/app/api/analyze-resume/route";
 
@@ -71,9 +76,11 @@ export function ResumeAnalyzer() {
   const [activeInputTab, setActiveInputTab] = useState<"upload" | "paste">("upload");
   const [resumeText, setResumeText] = useState("");
   const [fileName, setFileName] = useState<string | null>(null);
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [fileBase64, setFileBase64] = useState<string | null>(null);
   const [fileMimeType, setFileMimeType] = useState<string | null>(null);
   const [fileSizeStr, setFileSizeStr] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
   const [targetRole, setTargetRole] = useState("");
   const [jobDescription, setJobDescription] = useState("");
   const [showJobDetails, setShowJobDetails] = useState(false);
@@ -84,6 +91,12 @@ export function ResumeAnalyzer() {
   const [result, setResult] = useState<ResumeAnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Full-stack saved scans state
+  const [savedScans, setSavedScans] = useState<any[]>([]);
+  const [showSavedModal, setShowSavedModal] = useState(false);
+  const [isSavingScan, setIsSavingScan] = useState(false);
+  const [hasSavedCurrent, setHasSavedCurrent] = useState(false);
+
   // Result view state
   const [activeResultTab, setActiveResultTab] = useState<
     "flaws" | "improvements" | "keywords" | "breakdown" | "profile"
@@ -93,18 +106,36 @@ export function ResumeAnalyzer() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const fetchSavedScans = async () => {
+    try {
+      const res = await fetch("/api/resumes");
+      if (res.ok) {
+        const data = await res.json();
+        setSavedScans(data.resumes || []);
+      }
+    } catch (err) {
+      console.error("Failed to load saved scans:", err);
+    }
+  };
+
+  useEffect(() => {
+    fetchSavedScans();
+  }, [user]);
+
   const processFile = (file: File) => {
     if (!file) return;
 
+    setUploadedFile(file);
     setFileName(file.name);
     setFileSizeStr((file.size / 1024).toFixed(1) + " KB");
     setError(null);
+    setHasSavedCurrent(false);
 
     const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
     const mime = isPdf ? "application/pdf" : file.type || "text/plain";
     setFileMimeType(mime);
 
-    // Read as Data URL for Gemini API transmission
+    // Read as Data URL for fallback transmission
     const base64Reader = new FileReader();
     base64Reader.onload = (e) => {
       const dataUrl = e.target?.result as string;
@@ -123,7 +154,7 @@ export function ResumeAnalyzer() {
       };
       textReader.readAsText(file);
     } else {
-      // For PDF / other binary formats, extract readable text snippets as fallback
+      // For PDF / other binary formats, extract readable text snippets as preview fallback
       const textReader = new FileReader();
       textReader.onload = (e) => {
         const raw = e.target?.result as string;
@@ -154,6 +185,7 @@ export function ResumeAnalyzer() {
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    setIsDragging(false);
     const file = e.dataTransfer.files?.[0];
     if (file) {
       processFile(file);
@@ -163,6 +195,7 @@ export function ResumeAnalyzer() {
   const loadSample = (type: "engineer" | "fintech") => {
     const sample = type === "engineer" ? SAMPLE_ENGINEER_RESUME : SAMPLE_FINTECH_RESUME;
     setResumeText(sample);
+    setUploadedFile(null);
     setFileBase64(null);
     setFileMimeType("text/plain");
     setFileSizeStr("2.4 KB");
@@ -170,8 +203,56 @@ export function ResumeAnalyzer() {
     setTargetRole(type === "engineer" ? "Senior Full-Stack Software Engineer" : "Senior Financial Analyst");
   };
 
+  const saveCurrentScan = async (overrideResult?: ResumeAnalysisResult) => {
+    const toSave = overrideResult || result;
+    if (!toSave) return;
+    setIsSavingScan(true);
+    try {
+      const res = await fetch("/api/resumes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fileName: fileName || "Resume.pdf",
+          targetRole: targetRole || undefined,
+          atsScore: toSave.atsScore,
+          tier: toSave.tier,
+          summary: toSave.summary,
+          analysis: toSave,
+        }),
+      });
+      if (res.ok) {
+        setHasSavedCurrent(true);
+        fetchSavedScans();
+      }
+    } catch (err) {
+      console.error("Save scan failed:", err);
+    } finally {
+      setIsSavingScan(false);
+    }
+  };
+
+  const deleteSavedScan = async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      const res = await fetch(`/api/resumes?id=${id}`, { method: "DELETE" });
+      if (res.ok) {
+        setSavedScans((prev) => prev.filter((s) => s.id !== id));
+      }
+    } catch (err) {
+      console.error("Delete scan failed:", err);
+    }
+  };
+
+  const loadSavedScan = (saved: any) => {
+    setResult(saved.analysis);
+    setFileName(saved.fileName);
+    setTargetRole(saved.targetRole || "");
+    setHasSavedCurrent(true);
+    setShowSavedModal(false);
+  };
+
   const runAnalysis = async () => {
-    if (!resumeText.trim() && !fileBase64) {
+    if (!resumeText.trim() && !uploadedFile && !fileBase64) {
       setError("Please upload a resume file or paste resume text first.");
       return;
     }
@@ -186,25 +267,42 @@ export function ResumeAnalyzer() {
     }, 900);
 
     try {
+      // Use FormData for standard full-stack binary upload
+      const formData = new FormData();
+      if (uploadedFile) {
+        formData.append("file", uploadedFile);
+      }
+      if (resumeText.trim()) {
+        formData.append("resumeText", resumeText.trim());
+      }
+      if (fileBase64) {
+        formData.append("fileBase64", fileBase64);
+        formData.append("fileMimeType", fileMimeType || "application/pdf");
+      }
+      if (fileName) {
+        formData.append("fileName", fileName);
+      }
+      if (targetRole.trim()) {
+        formData.append("targetRole", targetRole.trim());
+      }
+      if (jobDescription.trim()) {
+        formData.append("jobDescription", jobDescription.trim());
+      }
+
       const response = await fetch("/api/analyze-resume", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          resumeText: resumeText.trim() || undefined,
-          fileBase64: fileBase64 || undefined,
-          fileMimeType: fileMimeType || undefined,
-          fileName: fileName || undefined,
-          targetRole: targetRole.trim() || undefined,
-          jobDescription: jobDescription.trim() || undefined,
-        }),
+        body: formData,
       });
 
       if (!response.ok) {
-        throw new Error("Analysis failed. Please check your resume text and try again.");
+        const errJson = await response.json().catch(() => ({ error: "Analysis failed" }));
+        throw new Error(errJson.error || "Analysis failed. Please check your resume and try again.");
       }
 
       const data: ResumeAnalysisResult = await response.json();
       setResult(data);
+      // Automatically persist scan to backend database
+      saveCurrentScan(data);
     } catch (err: unknown) {
       console.error(err);
       setError(err instanceof Error ? err.message : "Failed to analyze resume.");
@@ -224,10 +322,12 @@ export function ResumeAnalyzer() {
     setResult(null);
     setResumeText("");
     setFileName(null);
+    setUploadedFile(null);
     setFileBase64(null);
     setFileMimeType(null);
     setFileSizeStr(null);
     setError(null);
+    setHasSavedCurrent(false);
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
@@ -297,8 +397,18 @@ export function ResumeAnalyzer() {
                   </button>
                 </div>
 
-                {/* Sample Resumes */}
-                <div className="flex items-center gap-2">
+                {/* Sample Resumes & Saved Scans */}
+                <div className="flex flex-wrap items-center gap-2">
+                  {savedScans.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowSavedModal(true)}
+                      className="text-xs font-semibold px-2.5 py-1 rounded-lg bg-zinc-900 text-white hover:bg-zinc-800 transition cursor-pointer flex items-center gap-1.5"
+                    >
+                      <History className="size-3 text-[#bef264]" />
+                      <span>Saved Scans ({savedScans.length})</span>
+                    </button>
+                  )}
                   <span className="text-xs text-zinc-400 font-medium">Quick Test:</span>
                   <button
                     type="button"
@@ -324,9 +434,11 @@ export function ResumeAnalyzer() {
                     id="resume-file-input"
                     ref={fileInputRef}
                     type="file"
-                    accept=".txt,.md,.pdf,.docx,.doc,application/pdf,text/plain"
+                    accept=".pdf,.doc,.docx,.txt,.md,application/pdf,text/plain"
                     onChange={handleFileUpload}
-                    className="sr-only"
+                    className="hidden"
+                    tabIndex={-1}
+                    aria-hidden="true"
                   />
 
                   {fileName ? (
@@ -344,18 +456,19 @@ export function ResumeAnalyzer() {
                           )}
                         </h4>
                         <p className="text-xs text-zinc-600 mt-1">
-                          File loaded successfully • Ready for comprehensive ATS scoring & flaw detection
+                          File loaded successfully • Click &quot;Analyze Resume & Calculate ATS Score&quot; below
                         </p>
                       </div>
 
                       <div className="flex flex-wrap items-center justify-center gap-2 mt-2">
-                        <label
-                          htmlFor="resume-file-input"
+                        <button
+                          type="button"
+                          onClick={() => fileInputRef.current?.click()}
                           className="px-4 py-2 rounded-full text-xs font-semibold bg-white border border-black/[0.1] text-[#0e2118] hover:border-[#0e2118] hover:bg-zinc-50 transition shadow-2xs cursor-pointer inline-flex items-center gap-1.5"
                         >
                           <Upload className="size-3.5" />
                           <span>Change File</span>
-                        </label>
+                        </button>
                         <button
                           type="button"
                           onClick={handleReset}
@@ -366,35 +479,55 @@ export function ResumeAnalyzer() {
                       </div>
                     </div>
                   ) : (
-                    <label
-                      htmlFor="resume-file-input"
+                    <div
+                      onClick={() => fileInputRef.current?.click()}
                       onDragOver={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
+                        setIsDragging(true);
                       }}
                       onDragEnter={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
+                        setIsDragging(true);
+                      }}
+                      onDragLeave={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setIsDragging(false);
                       }}
                       onDrop={handleDrop}
-                      className="group block border-2 border-dashed border-black/[0.12] hover:border-[#0e2118] bg-black/[0.01] hover:bg-black/[0.02] rounded-2xl p-8 sm:p-10 text-center cursor-pointer transition-all"
+                      className={`group block border-2 border-dashed rounded-2xl p-8 sm:p-10 text-center cursor-pointer transition-all ${
+                        isDragging
+                          ? "border-emerald-600 bg-emerald-50 scale-[1.01]"
+                          : "border-black/[0.12] hover:border-[#0e2118] bg-black/[0.01] hover:bg-black/[0.02]"
+                      }`}
                     >
                       <div className="flex flex-col items-center gap-2.5">
-                        <div className="size-12 rounded-2xl bg-black/[0.04] group-hover:bg-[#bef264] text-[#0e2118] flex items-center justify-center transition-colors shadow-2xs">
+                        <div className={`size-12 rounded-2xl flex items-center justify-center transition-colors shadow-2xs ${
+                          isDragging ? "bg-emerald-600 text-white" : "bg-black/[0.04] group-hover:bg-[#bef264] text-[#0e2118]"
+                        }`}>
                           <Upload className="size-5" />
                         </div>
                         <h4 className="text-sm font-bold text-[#0e2118]">
-                          Drag and drop your resume file here
+                          {isDragging ? "Drop your resume file here!" : "Click to browse or drag & drop your resume"}
                         </h4>
                         <p className="text-xs text-zinc-500 max-w-sm">
-                          Supports PDF, DOCX, TXT, or Markdown documents (up to 10MB)
+                          Supports PDF, DOCX, TXT, or Markdown documents (up to 20MB)
                         </p>
-                        <span className="mt-3 inline-flex items-center gap-1.5 px-4 py-2 rounded-full text-xs font-semibold bg-[#0e2118] text-white group-hover:bg-[#163628] shadow-sm transition">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            fileInputRef.current?.click();
+                          }}
+                          className="mt-3 inline-flex items-center gap-1.5 px-4 py-2 rounded-full text-xs font-semibold bg-[#0e2118] text-white hover:bg-[#163628] shadow-sm transition cursor-pointer"
+                        >
                           <Upload className="size-3" />
-                          <span>Browse Files</span>
-                        </span>
+                          <span>Select Resume File</span>
+                        </button>
                       </div>
-                    </label>
+                    </div>
                   )}
                 </div>
               ) : (
@@ -479,7 +612,7 @@ export function ResumeAnalyzer() {
                 <button
                   type="button"
                   onClick={runAnalysis}
-                  disabled={isAnalyzing || (!resumeText.trim() && !fileBase64)}
+                  disabled={isAnalyzing || (!resumeText.trim() && !uploadedFile && !fileBase64)}
                   className="w-full py-3.5 px-6 rounded-full text-sm font-semibold bg-[#0e2118] text-white hover:bg-[#163628] disabled:opacity-50 transition shadow-md flex items-center justify-center gap-2 cursor-pointer"
                 >
                   {isAnalyzing ? (
@@ -597,6 +730,29 @@ export function ResumeAnalyzer() {
                     {result.summary}
                   </p>
                   <div className="flex flex-wrap items-center gap-2.5">
+                    <button
+                      type="button"
+                      onClick={() => saveCurrentScan()}
+                      disabled={isSavingScan}
+                      className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-full text-xs font-semibold border transition cursor-pointer ${
+                        hasSavedCurrent
+                          ? "bg-[#f2fbe8] border-[#bef264] text-[#1e3d2c]"
+                          : "bg-white border-black/[0.1] text-[#0e2118] hover:bg-zinc-50"
+                      }`}
+                    >
+                      <Bookmark className={`size-3.5 ${hasSavedCurrent ? "fill-current text-emerald-700" : ""}`} />
+                      <span>{hasSavedCurrent ? "Saved to Profile" : isSavingScan ? "Saving..." : "Save Scan"}</span>
+                    </button>
+                    {savedScans.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setShowSavedModal(true)}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full text-xs font-semibold bg-zinc-100 border border-zinc-200 text-zinc-800 hover:bg-zinc-200 transition cursor-pointer"
+                      >
+                        <History className="size-3.5 text-zinc-600" />
+                        <span>History ({savedScans.length})</span>
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => window.print()}
@@ -978,6 +1134,113 @@ export function ResumeAnalyzer() {
                     </div>
                   </div>
                 )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* SAVED SCANS MODAL */}
+        {showSavedModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs animate-in fade-in duration-200">
+            <div className="bg-white rounded-3xl max-w-2xl w-full max-h-[85vh] flex flex-col shadow-2xl border border-black/[0.08] overflow-hidden">
+              {/* Modal Header */}
+              <div className="px-6 py-5 border-b border-zinc-100 flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className="size-9 rounded-xl bg-[#f2fbe8] text-[#1e3d2c] border border-[#bef264] flex items-center justify-center">
+                    <History className="size-4.5" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-[#0e2118]">
+                      Saved Resume Scans
+                    </h3>
+                    <p className="text-xs text-zinc-500">
+                      {savedScans.length} analysis reports stored in your full-stack account
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowSavedModal(false)}
+                  className="size-8 rounded-full hover:bg-zinc-100 text-zinc-400 hover:text-zinc-700 flex items-center justify-center transition cursor-pointer"
+                >
+                  <X className="size-4" />
+                </button>
+              </div>
+
+              {/* Modal Body */}
+              <div className="p-6 overflow-y-auto space-y-3.5 flex-1">
+                {savedScans.length === 0 ? (
+                  <div className="py-12 text-center">
+                    <FileText className="size-10 text-zinc-300 mx-auto mb-3" />
+                    <p className="text-sm font-medium text-zinc-600">No saved scans found</p>
+                    <p className="text-xs text-zinc-400 mt-1">
+                      Upload or paste your resume and run an analysis to save it to your account.
+                    </p>
+                  </div>
+                ) : (
+                  savedScans.map((scan) => (
+                    <div
+                      key={scan.id}
+                      onClick={() => loadSavedScan(scan)}
+                      className="group p-4 rounded-2xl border border-zinc-200 hover:border-[#0e2118] bg-zinc-50/50 hover:bg-white transition-all cursor-pointer shadow-2xs hover:shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+                    >
+                      <div className="space-y-1 min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-bold text-[#0e2118] truncate">
+                            {scan.fileName}
+                          </span>
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#f2fbe8] text-[#1e3d2c] border border-[#bef264] font-semibold shrink-0">
+                            {scan.tier}
+                          </span>
+                        </div>
+                        {scan.targetRole && (
+                          <p className="text-xs text-zinc-500 truncate">
+                            Role: {scan.targetRole}
+                          </p>
+                        )}
+                        <p className="text-[11px] text-zinc-400">
+                          {new Date(scan.createdAt).toLocaleDateString("en-US", {
+                            month: "short",
+                            day: "numeric",
+                            year: "numeric",
+                            hour: "numeric",
+                            minute: "2-digit",
+                          })}
+                        </p>
+                      </div>
+
+                      <div className="flex items-center gap-3 shrink-0">
+                        <div className="flex flex-col items-center justify-center px-3 py-1.5 rounded-xl bg-white border border-zinc-200">
+                          <span className="text-lg font-black text-[#0e2118]">
+                            {scan.atsScore}
+                          </span>
+                          <span className="text-[9px] font-bold text-zinc-400 uppercase">
+                            ATS Score
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={(e) => deleteSavedScan(scan.id, e)}
+                          title="Delete saved scan"
+                          className="size-8 rounded-lg hover:bg-rose-50 text-zinc-400 hover:text-rose-600 flex items-center justify-center transition cursor-pointer"
+                        >
+                          <Trash2 className="size-4" />
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              {/* Modal Footer */}
+              <div className="px-6 py-4 border-t border-zinc-100 bg-zinc-50/50 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setShowSavedModal(false)}
+                  className="px-4 py-2 rounded-full text-xs font-semibold bg-zinc-900 text-white hover:bg-zinc-800 transition cursor-pointer"
+                >
+                  Close
+                </button>
               </div>
             </div>
           </div>

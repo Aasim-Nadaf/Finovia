@@ -54,15 +54,36 @@ export interface ResumeAnalysisResult {
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json();
-    const {
-      resumeText,
-      fileBase64,
-      fileMimeType,
-      fileName,
-      targetRole,
-      jobDescription,
-    } = body;
+    const contentType = req.headers.get("content-type") || "";
+    let resumeText = "";
+    let fileBase64 = "";
+    let fileMimeType = "";
+    let fileName = "";
+    let targetRole = "";
+    let jobDescription = "";
+
+    if (contentType.includes("multipart/form-data")) {
+      const formData = await req.formData();
+      resumeText = (formData.get("resumeText") as string) || "";
+      targetRole = (formData.get("targetRole") as string) || "";
+      jobDescription = (formData.get("jobDescription") as string) || "";
+
+      const file = formData.get("file") as File | null;
+      if (file && file.size > 0) {
+        fileName = file.name;
+        fileMimeType = file.type || (file.name.endsWith(".pdf") ? "application/pdf" : "text/plain");
+        const buffer = Buffer.from(await file.arrayBuffer());
+        fileBase64 = buffer.toString("base64");
+      }
+    } else {
+      const body = await req.json();
+      resumeText = body.resumeText || "";
+      fileBase64 = body.fileBase64 || "";
+      fileMimeType = body.fileMimeType || "";
+      fileName = body.fileName || "";
+      targetRole = body.targetRole || "";
+      jobDescription = body.jobDescription || "";
+    }
 
     const hasText = typeof resumeText === "string" && resumeText.trim().length > 0;
     const hasFile = typeof fileBase64 === "string" && fileBase64.length > 0;
@@ -71,6 +92,14 @@ export async function POST(req: Request) {
       return NextResponse.json(
         { error: "Please provide resume content or upload a resume file to analyze." },
         { status: 400 }
+      );
+    }
+
+    // Security & payload bounds check (max ~25MB base64)
+    if (hasFile && fileBase64.length > 25 * 1024 * 1024) {
+      return NextResponse.json(
+        { error: "Resume file exceeds maximum allowed size (20MB)." },
+        { status: 413 }
       );
     }
 
@@ -92,7 +121,7 @@ export async function POST(req: Request) {
         });
 
         const promptText = `You are a world-class Application Tracking System (ATS) parsing engine and executive technical recruiter.
-Analyze the following resume thoroughly for ATS compatibility, keyword density, quantified achievements, grammatical clarity, formatting pitfalls, and overall competitiveness.
+Analyze the following resume thoroughly for ATS compatibility (Workday, Greenhouse, Lever, Taleo), keyword density, quantified achievements, grammatical clarity, formatting pitfalls, and overall competitiveness.
 
 ${targetRole ? `Target Role: ${targetRole}\n` : ""}
 ${jobDescription ? `Target Job Description: ${jobDescription}\n` : ""}
@@ -100,15 +129,15 @@ ${fileName ? `File Name: ${fileName}\n` : ""}
 
 ${
   hasText
-    ? `RESUME CONTENT:\n"""\n${resumeText.slice(0, 15000)}\n"""`
+    ? `RESUME CONTENT:\n"""\n${resumeText.slice(0, 20000)}\n"""`
     : `Please analyze the attached resume document.`
 }
 
 You MUST return your output strictly in valid JSON format matching this TypeScript interface:
 {
-  "atsScore": number (0 to 100),
+  "atsScore": number (integer between 0 and 100),
   "tier": "Excellent" | "Good" | "Needs Optimization" | "Critical Issues",
-  "summary": string (3-4 sentences executive assessment),
+  "summary": string (3-4 sentences executive assessment evaluating ATS readiness and competitive strength),
   "categoryScores": {
     "keywordMatch": { "score": number (0-100), "feedback": string },
     "formattingAndATS": { "score": number (0-100), "feedback": string },
@@ -154,7 +183,6 @@ You MUST return your output strictly in valid JSON format matching this TypeScri
 Do not enclose the response in markdown code fences (\`\`\`json). Return ONLY the raw JSON object.`;
 
         type ContentPart =
-          | string
           | { text: string }
           | { inlineData: { mimeType: string; data: string } };
 
@@ -173,19 +201,23 @@ Do not enclose the response in markdown code fences (\`\`\`json). Return ONLY th
 
         const response = await ai.models.generateContent({
           model: "gemini-3.8-flash",
-          contents: contentParts,
+          contents: { parts: contentParts },
+          config: {
+            responseMimeType: "application/json",
+          },
         });
 
         const responseText = response.text || "";
-        // Strip markdown fences if present
+        // Strip markdown fences if present as safe precaution
         const cleanedText = responseText
           .replace(/^```json\s*/i, "")
           .replace(/^```\s*/i, "")
           .replace(/```\s*$/i, "")
           .trim();
 
-        const parsedResult = JSON.parse(cleanedText) as ResumeAnalysisResult;
-        return NextResponse.json(parsedResult);
+        const rawParsed = JSON.parse(cleanedText);
+        const normalizedResult = normalizeResult(rawParsed, effectiveText, targetRole);
+        return NextResponse.json(normalizedResult);
       } catch (geminiError) {
         console.error("Gemini API call failed, falling back to local analysis engine:", geminiError);
         // Fall back to rule-based engine below
@@ -342,3 +374,91 @@ function generateHeuristicAnalysis(text: string, targetRole?: string): ResumeAna
     },
   };
 }
+
+function normalizeResult(
+  raw: any,
+  fallbackText: string,
+  targetRole?: string
+): ResumeAnalysisResult {
+  const fallback = generateHeuristicAnalysis(fallbackText, targetRole);
+
+  const rawScore = typeof raw.atsScore === "number" ? raw.atsScore : fallback.atsScore;
+  const atsScore = Math.min(Math.max(Math.round(rawScore), 0), 100);
+
+  let tier: ResumeAnalysisResult["tier"] = "Needs Optimization";
+  if (atsScore >= 85) tier = "Excellent";
+  else if (atsScore >= 70) tier = "Good";
+  else if (atsScore >= 50) tier = "Needs Optimization";
+  else tier = "Critical Issues";
+
+  return {
+    atsScore,
+    tier: raw.tier || tier,
+    summary:
+      typeof raw.summary === "string" && raw.summary.trim().length > 0
+        ? raw.summary
+        : fallback.summary,
+    categoryScores: {
+      keywordMatch: {
+        score: Math.min(Math.max(raw.categoryScores?.keywordMatch?.score ?? fallback.categoryScores.keywordMatch.score, 0), 100),
+        feedback: raw.categoryScores?.keywordMatch?.feedback || fallback.categoryScores.keywordMatch.feedback,
+      },
+      formattingAndATS: {
+        score: Math.min(Math.max(raw.categoryScores?.formattingAndATS?.score ?? fallback.categoryScores.formattingAndATS.score, 0), 100),
+        feedback: raw.categoryScores?.formattingAndATS?.feedback || fallback.categoryScores.formattingAndATS.feedback,
+      },
+      impactAndMetrics: {
+        score: Math.min(Math.max(raw.categoryScores?.impactAndMetrics?.score ?? fallback.categoryScores.impactAndMetrics.score, 0), 100),
+        feedback: raw.categoryScores?.impactAndMetrics?.feedback || fallback.categoryScores.impactAndMetrics.feedback,
+      },
+      experienceRelevance: {
+        score: Math.min(Math.max(raw.categoryScores?.experienceRelevance?.score ?? fallback.categoryScores.experienceRelevance.score, 0), 100),
+        feedback: raw.categoryScores?.experienceRelevance?.feedback || fallback.categoryScores.experienceRelevance.feedback,
+      },
+      skillsDistribution: {
+        score: Math.min(Math.max(raw.categoryScores?.skillsDistribution?.score ?? fallback.categoryScores.skillsDistribution.score, 0), 100),
+        feedback: raw.categoryScores?.skillsDistribution?.feedback || fallback.categoryScores.skillsDistribution.feedback,
+      },
+    },
+    flaws: Array.isArray(raw.flaws) && raw.flaws.length > 0
+      ? raw.flaws.map((f: any, idx: number) => ({
+          id: f.id || `flaw_${idx + 1}`,
+          title: f.title || "ATS Formatting Notice",
+          severity: ["high", "medium", "low"].includes(f.severity) ? f.severity : "medium",
+          location: f.location || "Resume Body",
+          issue: f.issue || "Potential ATS parsing ambiguity detected.",
+          whyItMatters: f.whyItMatters || "Impairs applicant tracking system keyword ranking.",
+        }))
+      : fallback.flaws,
+    improvements: Array.isArray(raw.improvements) && raw.improvements.length > 0
+      ? raw.improvements.map((imp: any, idx: number) => ({
+          id: imp.id || `imp_${idx + 1}`,
+          title: imp.title || "Strengthen Responsibility Statement",
+          impact: ["high", "medium"].includes(imp.impact) ? imp.impact : "high",
+          recommendation: imp.recommendation || "Incorporate measurable business metrics.",
+          beforeExcerpt: imp.beforeExcerpt || "Responsible for general project development tasks.",
+          afterExample: imp.afterExample || "Led development and delivery of key features, improving system performance by 25%.",
+        }))
+      : fallback.improvements,
+    atsKeywords: {
+      matched: Array.isArray(raw.atsKeywords?.matched) && raw.atsKeywords.matched.length > 0
+        ? raw.atsKeywords.matched
+        : fallback.atsKeywords.matched,
+      missing: Array.isArray(raw.atsKeywords?.missing)
+        ? raw.atsKeywords.missing
+        : fallback.atsKeywords.missing,
+      recommendedAction: raw.atsKeywords?.recommendedAction || fallback.atsKeywords.recommendedAction,
+    },
+    parsedData: {
+      candidateName: raw.parsedData?.candidateName || fallback.parsedData.candidateName,
+      email: raw.parsedData?.email || fallback.parsedData.email,
+      phone: raw.parsedData?.phone || fallback.parsedData.phone,
+      detectedRole: raw.parsedData?.detectedRole || fallback.parsedData.detectedRole,
+      yearsExperience: raw.parsedData?.yearsExperience || fallback.parsedData.yearsExperience,
+      topSkills: Array.isArray(raw.parsedData?.topSkills) && raw.parsedData.topSkills.length > 0
+        ? raw.parsedData.topSkills
+        : fallback.parsedData.topSkills,
+    },
+  };
+}
+

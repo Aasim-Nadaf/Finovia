@@ -29,42 +29,102 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
+  // Sync session on mount from server
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) {
-        setUser(JSON.parse(stored));
+    async function checkSession() {
+      try {
+        const res = await fetch("/api/auth/me");
+        if (res.ok) {
+          const data = await res.json();
+          if (data.user) {
+            setUser(data.user);
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(data.user));
+            return;
+          }
+        }
+        // Fallback to local storage if offline
+        const stored = localStorage.getItem(STORAGE_KEY);
+        if (stored) {
+          setUser(JSON.parse(stored));
+        }
+      } catch {
+        const stored = localStorage.getItem(STORAGE_KEY);
+        if (stored) {
+          setUser(JSON.parse(stored));
+        }
+      } finally {
+        setIsLoading(false);
       }
-    } catch {
-      // Ignore storage read errors
-    } finally {
-      setIsLoading(false);
     }
+    checkSession();
   }, []);
 
-  const login = async (email: string, _password?: string, name?: string) => {
-    const newUser: User = {
-      id: "usr_" + Math.random().toString(36).substring(2, 9),
-      name: name || email.split("@")[0] || "Finovia User",
-      email,
-      avatar: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=120&auto=format&fit=crop&q=80",
-      role: "Candidate",
-      tier: "Pro",
-    };
-    setUser(newUser);
+  const login = async (email: string, password?: string, name?: string): Promise<boolean> => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(newUser));
-    } catch {
-      // Storage fallback
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: email.trim(),
+          password: password || "password123",
+          name: name?.trim(),
+        }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({ error: "Failed to log in" }));
+        throw new Error(errData.error || "Login failed");
+      }
+
+      const data = await res.json();
+      if (data.user) {
+        setUser(data.user);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data.user));
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.error("Login error:", err);
+      throw err;
     }
-    return true;
   };
 
-  const signup = async (name: string, email: string, _password?: string) => {
-    return login(email, _password, name);
+  const signup = async (name: string, email: string, password?: string): Promise<boolean> => {
+    try {
+      const res = await fetch("/api/auth/signup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: name.trim(),
+          email: email.trim(),
+          password: password || "password123",
+        }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({ error: "Failed to sign up" }));
+        throw new Error(errData.error || "Signup failed");
+      }
+
+      const data = await res.json();
+      if (data.user) {
+        setUser(data.user);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data.user));
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.error("Signup error:", err);
+      throw err;
+    }
   };
 
-  const logout = () => {
+  const logout = async () => {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch {
+      // Ignore network errors on logout
+    }
     setUser(null);
     try {
       localStorage.removeItem(STORAGE_KEY);
@@ -73,33 +133,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  const demoLogin = (type: "candidate" | "recruiter" = "candidate") => {
-    const demoUser: User =
-      type === "candidate"
-        ? {
-            id: "usr_demo_cand",
-            name: "Alex Morgan",
-            email: "alex.morgan@fintech.dev",
-            avatar:
-              "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=120&auto=format&fit=crop&q=80",
-            role: "Senior Software Engineer",
-            tier: "Pro",
-          }
-        : {
-            id: "usr_demo_rec",
-            name: "Sarah Lin",
-            email: "sarah.lin@finovia.io",
-            avatar:
-              "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=120&auto=format&fit=crop&q=80",
-            role: "Talent Acquisition Partner",
-            tier: "Enterprise",
-          };
-    setUser(demoUser);
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(demoUser));
-    } catch {
-      // Ignore
-    }
+  const demoLogin = async (type: "candidate" | "recruiter" = "candidate") => {
+    const email = type === "candidate" ? "alex.morgan@fintech.dev" : "sarah.lin@finovia.io";
+    return login(email, "password123");
   };
 
   return (
