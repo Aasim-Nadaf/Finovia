@@ -1,0 +1,6 @@
+{
+  "name": "Finovia",
+  "description": "Finovia — Financial Freedom & Smart Fintech Platform for real-time revenue tracking, spending limits, automated financial reports, and wealth management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
